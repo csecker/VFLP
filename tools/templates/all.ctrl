@@ -210,6 +210,16 @@ tautomerization=true
 #   * true
 # Settable via range control files: Yes
 
+tautomerization_program_1=obabel
+tautomerization_program_2=none
+# Program 1 is used at first for each ligand, and if it fails program 2 is used instead. If the second program also fails, then the ligand is skipped.
+# Setting only required if tautomerization=true
+# Possible values:
+#   * obabel
+#   * cxcalc
+#   * none (only for tautomerization_program_2)
+# Settable via range control files: Yes
+
 tautomerization_obligatory=false
 # Setting only required if tautomerization=true
 # Possible values:
