@@ -1020,9 +1020,25 @@ tautomerization="$(grep -m 1 "^tautomerization=" ${VF_CONTROLFILE_TEMP} | tr -d 
 if [ "${tautomerization}" == "true" ]; then
 
     # Variables
+    tautomerization_program_1="$(grep -m 1 "^tautomerization_program_1=" ${VF_CONTROLFILE_TEMP} | tr -d '[[:space:]]' | awk -F '[=#]' '{print $2}')"
+    tautomerization_program_2="$(grep -m 1 "^tautomerization_program_2=" ${VF_CONTROLFILE_TEMP} | tr -d '[[:space:]]' | awk -F '[=#]' '{print $2}')"
     tautomerization_obligatory="$(grep -m 1 "^tautomerization_obligatory=" ${VF_CONTROLFILE_TEMP} | tr -d '[[:space:]]' | awk -F '[=#]' '{print $2}')"
-    cxcalc_tautomerization_options="$(grep -m 1 "^cxcalc_tautomerization_options=" ${VF_CONTROLFILE_TEMP} | tr -d '[[:space:]]' | awk -F '[=#]' '{print $2}')"
-    cxcalc_version="$(ng --nailgun-server localhost --nailgun-port ${NG_PORT} chemaxon.marvin.Calculator | grep -m 1 version | sed "s/.*version \([0-9. ]*\).*/\1/")"
+
+    # Interdependent variables
+    if [[ "${tautomerization_program_1}" ==  "cxcalc" ]] || [[ "${tautomerization_program_2}" ==  "cxcalc" ]]; then
+      cxcalc_tautomerization_options="$(grep -m 1 "^cxcalc_tautomerization_options=" ${VF_CONTROLFILE_TEMP} | tr -d '[[:space:]]' | awk -F '[=#]' '{print $2}')"
+      cxcalc_version="$(ng --nailgun-server localhost --nailgun-port ${NG_PORT} chemaxon.marvin.Calculator | grep -m 1 version | sed "s/.*version \([0-9. ]*\).*/\1/")"
+    fi
+
+    # Checking some variables
+    if [[ "${tautomerization_program_1}" !=  "cxcalc" ]] && [[ "${tautomerization_program_1}" !=  "obabel" ]]; then
+        echo -e " Error: The value (${tautomerization_program_1}) for tautomerization_program_1 which was specified in the controlfile is invalid..."
+        error_response_std $LINENO
+    elif [[ "${tautomerization_program_2}" !=  "cxcalc" ]] && [[ "${tautomerization_program_2}" !=  "obabel" ]] && [[ "${tautomerization_program_2}" ==  "none" ]]; then
+        echo -e " Error: The value (${tautomerization_program_2}) for tautomerization_program_2 which was specified in the controlfile is invalid..."
+        error_response_std $LINENO
+    fi
+
 fi
 
 # Protonation settings
