@@ -86,7 +86,7 @@ trap 'time_near_limit' 1 2 3 9 10 12 15
 # Cleaning the queue folders
 clean_queue_files_tmp() {
 
-    cp ${VF_TMPDIR}/${USER}/VFLP/${VF_JOBLETTER}/${VF_QUEUE_NO_12}/${VF_QUEUE_NO}/workflow/output-files/queues/${VF_QUEUE_NO_1}/${VF_QUEUE_NO_2}/${VF_QUEUE_NO}queue-${VF_QUEUE_NO}.* ../workflow/output-files/queues/${VF_QUEUE_NO_1}/${VF_QUEUE_NO_2}/ || true
+    cp ${VF_TMPDIR}/${USER}/VFLP/${VF_JOBLETTER}/${VF_QUEUE_NO_12}/${VF_QUEUE_NO}/workflow/output-files/queues/${VF_QUEUE_NO_1}/${VF_QUEUE_NO_2}/queue-${VF_QUEUE_NO}.* ../workflow/output-files/queues/${VF_QUEUE_NO_1}/${VF_QUEUE_NO_2}/ || true
 
     sleep 1
     rm -r ${VF_TMPDIR}/${USER}/VFLP/${VF_JOBLETTER}/${VF_QUEUE_NO_12}/${VF_QUEUE_NO}/
@@ -481,7 +481,7 @@ grep -B 1000 "\." test | grep -A 1000 "\."
 check_sdf_coordinates() {
 
     # Checking the coordinates
-    no_nonzero_coord="$(grep -B 1000 "\." test | grep -A 1000 "\." | awk '{print $1$2$3}' | tr -d '0.\n\+\- '| wc -m)"
+    no_nonzero_coord="$(grep -B 1000 "\." | grep -A 1000 "\." | awk '{print $1$2$3}' | tr -d '0.\n\+\- '| wc -m)"
     if [ "${no_nonzero_coord}" -eq "0" ]; then
         echo "The sdf file only contains zero coordinates."
         return 1
@@ -1034,7 +1034,7 @@ if [ "${tautomerization}" == "true" ]; then
     if [[ "${tautomerization_program_1}" !=  "cxcalc" ]] && [[ "${tautomerization_program_1}" !=  "obabel" ]]; then
         echo -e " Error: The value (${tautomerization_program_1}) for tautomerization_program_1 which was specified in the controlfile is invalid..."
         error_response_std $LINENO
-    elif [[ "${tautomerization_program_2}" !=  "cxcalc" ]] && [[ "${tautomerization_program_2}" !=  "obabel" ]] && [[ "${tautomerization_program_2}" ==  "none" ]]; then
+    elif [[ "${tautomerization_program_2}" !=  "cxcalc" ]] && [[ "${tautomerization_program_2}" !=  "obabel" ]] && [[ "${tautomerization_program_2}" !=  "none" ]]; then
         echo -e " Error: The value (${tautomerization_program_2}) for tautomerization_program_2 which was specified in the controlfile is invalid..."
         error_response_std $LINENO
     fi
@@ -1060,7 +1060,7 @@ if [ "${protonation_state_generation}" == "true" ]; then
     if [[ "${protonation_program_1}" !=  "cxcalc" ]] && [[ "${protonation_program_1}" !=  "obabel" ]]; then
         echo -e " Error: The value (${protonation_program_1}) for protonation_program_1 which was specified in the controlfile is invalid..."
         error_response_std $LINENO
-    elif [[ "${protonation_program_2}" !=  "cxcalc" ]] && [[ "${protonation_program_2}" !=  "obabel" ]] && [[ "${protonation_program_2}" ==  "none" ]]; then
+    elif [[ "${protonation_program_2}" !=  "cxcalc" ]] && [[ "${protonation_program_2}" !=  "obabel" ]] && [[ "${protonation_program_2}" !=  "none" ]]; then
         echo -e " Error: The value (${protonation_program_2}) for protonation_program_2 which was specified in the controlfile is invalid..."
         error_response_std $LINENO
     fi
@@ -1085,7 +1085,7 @@ if [ "${conformation_generation}" == "true" ]; then
     if [[ "${conformation_program_1}" !=  "molconvert" ]] && [[ "${conformation_program_1}" !=  "obabel" ]]; then
         echo -e " Error: The value (${conformation_program_1}) for conformation_program_1 which was specified in the controlfile is invalid..."
         error_response_std $LINENO
-    elif [[ "${conformation_program_2}" !=  "molconvert" ]] && [[ "${conformation_program_2}" !=  "obabel" ]] && [[ "${protonation_program_2}" ==  "none" ]]; then
+    elif [[ "${conformation_program_2}" !=  "molconvert" ]] && [[ "${conformation_program_2}" !=  "obabel" ]] && [[ "${conformation_program_2}" ==  "none" ]]; then
         echo -e " Error: The value (${conformation_program_2}) for conformation_program_2 which was specified in the controlfile is invalid..."
         error_response_std $LINENO
     fi
@@ -1099,7 +1099,7 @@ if [ "${energy_check}" == "true" ]; then
     max_obabel_energy="$(grep -m 1 "^max_obabel_energy=" ${VF_CONTROLFILE_TEMP} | tr -d '[[:space:]]' | awk -F '[=#]' '{print $2}')"
 
     # Checking some variables
-    if ! [ "${max_obabel_energy}" -eq  "molconvert" ]; then
+    if ! [ "${max_obabel_energy}" =~ ^[0-9]+$ ]; then
         echo -e " Error: The value (${max_obabel_energy}) for max_obabel_energy which was specified in the controlfile is invalid..."
         error_response_std $LINENO
     fi
