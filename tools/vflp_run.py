@@ -660,7 +660,7 @@ def generate_target_format(ctx, tautomer, target_format, pdb_file, output_file):
 
 def run_protonation_instance(ctx, tautomer, program):
 	step_timer_start = time.perf_counter()
-	valid_programs = ("cxcalc", "obabel")
+	valid_programs = ("cxcalc", "obabel", "qupkake")
 
 	if(program == "none"):
 		raise RuntimeError(f"No protonation program remaining")
@@ -672,6 +672,9 @@ def run_protonation_instance(ctx, tautomer, program):
 			cxcalc_protonate(ctx, tautomer)
 		elif(program == "obabel"):
 			run_obabel_protonation(ctx, tautomer)
+		elif(program == "qupkake"):
+			i = 0
+			run_qupkake_protonation(ctx, tautomer, i)
 	except RuntimeError as error:
 		tautomer['timers'].append([f'{program}_protonate', time.perf_counter() - step_timer_start])
 		return error
@@ -1136,6 +1139,56 @@ def file_is_empty(filename):
 		for line in read_file:
 			return False
 	return True
+
+
+def rdkit_protonate_atom(mol, atom_idx, pH, pka, pka_type):
+
+	# Define maximum and minimum potential charges for common organic atoms
+	potential_charges = {
+		6: {'max': 1, 'min': -1},  # Carbon
+		7: {'max': 1, 'min': -1},  # Nitrogen
+		8: {'max': 1, 'min': -1},  # Oxygen
+		16: {'max': 2, 'min': -2},  # Sulfur
+		9: {'max': 1, 'min': -1},  # Fluorine
+		17: {'max': 1, 'min': -1},  # Chlorine
+		35: {'max': 1, 'min': -1},  # Bromine
+		53: {'max': 1, 'min': -1}  # Iodine
+	}
+
+	atom = mol.GetAtomWithIdx(atom_idx)
+	atomic_num = atom.GetAtomicNum()
+
+	if atomic_num in potential_charges:
+		# Current formal charge
+		current_charge = atom.GetFormalCharge()
+
+		# Maximum potential charge for this atom type
+		max_charge = potential_charges[atomic_num]['max']
+		min_charge = potential_charges[atomic_num]['min']
+
+	else:
+		return mol
+
+	if pH < pka and pka_type == "basic":
+		# Protonate the atom by adding a hydrogen atom
+		if current_charge < max_charge:
+			atom.SetFormalCharge(current_charge + 1)
+
+	elif pH > pka and pka_type == "acidic":
+		# Deprotonate if possible
+		if current_charge > min_charge:
+			# Get mol with all the hydrogens
+			mol_hs = Chem.AddHs(mol)
+			atom_hs = mol_hs.GetAtomWithIdx(atom_idx)
+
+			# Deprotonate the atom by removing a hydrogen atom
+			neighbors = atom_hs.GetNeighbors()
+			for neighbor in neighbors:
+				if neighbor.GetAtomicNum() == 1:  # Check if the neighbor is a hydrogen atom
+					atom.SetFormalCharge(atom.GetFormalCharge() - 1)
+					break
+
+	return mol
 
 
 ################
@@ -1768,6 +1821,98 @@ def run_obabel_protonation(ctx, tautomer):
 	]
 
 	tautomer['smi_protomer'] = run_obabel_general_get_value(cmd, output_file, timeout=ctx['config']['obabel_protonation_timeout'])
+
+
+def run_qupkake_protonation(ctx, tautomer, i):
+
+	if i == 0:
+		qupkake_sdf_filename = f"qupkake.proto.{tautomer['key']}_output.sdf"
+	else:
+		qupkake_sdf_filename = f"qupkake.proto.{tautomer['key']}_output_{i}.sdf"
+
+	cmd = [
+		'conda', 'run', '-n', ctx['config']['qupkake_conda_env'],
+		'qupkake', 'smi',  tautomer['smi'], '-mp', '1',
+		'-n', tautomer['key'], '-o', qupkake_sdf_filename,
+		'-r', ctx['temp_dir'].name
+	]
+
+	qupkake_sdf_filepath = os.path.join(ctx['temp_dir'].name, 'output', qupkake_sdf_filename)
+
+	try:
+		ret = subprocess.run(cmd, capture_output=True, text=True, timeout=int(ctx['config']['qupkake_protonation_timeout']))
+	except subprocess.TimeoutExpired as err:
+		raise RuntimeError(f"qupkake timed out") from err
+
+	output_lines = ret.stdout.splitlines()
+
+	if len(output_lines) == 0 or not os.path.isfile(qupkake_sdf_filepath):
+		raise RuntimeError(f"No output from qupkake")
+
+	else:
+		try:
+			qupkake_mol_supplier = Chem.SDMolSupplier(qupkake_sdf_filepath)
+		except:
+			raise RuntimeError(f"No or incorrect output file from qupkake")
+
+		mol = smi2mol(tautomer['smi'])
+		pka_values_basic = []
+		pka_values_acidic = []
+
+		for mol_entry in qupkake_mol_supplier:
+
+			pka_string = mol_entry.GetProp("pka")
+			pka_match = re.search(r'tensor\(([\d\.]+)\)', pka_string)
+
+			if pka_match:
+				pka = float(pka_match.group(1))
+			else:
+				pka = float(pka_string)
+				# raise ValueError("Invalid pKa format")
+
+			pka_type = mol_entry.GetProp("pka_type")
+			atom_idx = int(mol_entry.GetProp("idx"))
+			pka_tuple = (pka, pka_type, atom_idx)
+
+			if pka_type == 'basic':
+				pka_values_basic.append(pka_tuple)
+			else:
+				pka_values_acidic.append(pka_tuple)
+
+		pka_values_basic = sorted(pka_values_basic, key=lambda x: x[0], reverse=True)
+		pka_values_acidic = sorted(pka_values_acidic, key=lambda x: x[0], reverse=False)
+
+		mol_previous = mol
+
+		while mol2smi(mol) == mol2smi(mol_previous):
+
+			if len(pka_values_basic) != 0:
+				diff_basic = pka_values_basic[0][0] - float(ctx['config']['protonation_pH_value'])
+			else:
+				diff_basic = 0
+
+			if len(pka_values_acidic) != 0:
+				diff_acidic = float(ctx['config']['protonation_pH_value']) - pka_values_acidic[0][0]
+			else:
+				diff_acidic = 0
+
+			if diff_basic <= 0 and diff_acidic <= 0:
+				tautomer['smi_protomer'] = mol2smi(mol)
+				return
+
+			elif diff_basic > diff_acidic or diff_basic == diff_acidic:
+				mol = rdkit_protonate_atom(mol, pka_values_basic[0][2], float(ctx['config']['protonation_pH_value']),
+										   pka_values_basic[0][0], pka_values_basic[0][1])
+				pka_values_basic.pop(0)
+
+			elif diff_acidic > diff_basic:
+				mol = rdkit_protonate_atom(mol, pka_values_acidic[0][2], float(ctx['config']['protonation_pH_value']),
+											   pka_values_acidic[0][0], pka_values_acidic[0][1])
+				pka_values_acidic.pop(0)
+
+		i += 1
+		tautomer['smi'] = mol2smi(mol)
+		run_qupkake_protonation(ctx, tautomer, i)
 
 
 # Step 3b: Tautomerization by RDKit

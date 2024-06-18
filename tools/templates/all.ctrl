@@ -328,6 +328,7 @@ protonation_program_2=none
 # Possible values:
 #   * obabel
 #   * cxcalc
+#   * qupkake
 #   * none (only for protonation_program_2)
 
 cxcalc_protonation_timeout=15
@@ -335,6 +336,13 @@ cxcalc_protonation_timeout=15
 
 obabel_protonation_timeout=15
 # Time in seconds to wait to timeout
+
+qupkake_protonation_timeout=15
+# Time in seconds to wait to timeout
+
+qupkake_conda_env=qupkake
+# Setting only required if qupkake used as protonation_program
+# Specify name or location of qupkake conda env
 
 protonation_obligatory=false
 # Setting only required if protonation_state_generation=true
