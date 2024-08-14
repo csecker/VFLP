@@ -110,6 +110,6 @@ fi
 export CLASSPATH="${VFLP_PKG_TMP_DIR}/nailgun/nailgun-server/target/classes:${VFLP_PKG_TMP_DIR}/nailgun/nailgun-examples/target/classes:${VFLP_PKG_TMP_DIR}/jchemsuite/lib/*"
 export PATH="${VFLP_PKG_TMP_DIR}/java/bin:${VFLP_PKG_TMP_DIR}/nailgun/nailgun-client/target/:$PATH"
 
-env
+#env
 
 ./vflp_run.py

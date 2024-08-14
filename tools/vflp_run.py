@@ -43,6 +43,8 @@ import subprocess
 import botocore
 import logging
 import time
+from func_timeout import func_timeout, FunctionTimedOut
+import pandas as pd
 import pprint
 import itertools
 import csv
@@ -63,6 +65,7 @@ from rdkit import Chem
 from rdkit.Chem.MolStandardize import rdMolStandardize
 from rdkit.Chem import MolToSmiles as mol2smi
 from rdkit.Chem import MolFromSmiles as smi2mol
+from rdkit.Chem import AllChem
 from rdkit.Chem.EnumerateStereoisomers import EnumerateStereoisomers, StereoEnumerationOptions
 from rdkit.Chem.MolStandardize.rdMolStandardize import TautomerEnumerator
 
@@ -98,7 +101,7 @@ def process_ligand(ctx):
 
 	if(base_ligand['smi'] == ""):
 		logging.error(f"    * Warning: Ligand {base_ligand['key']} skipped since SMI is blank")
-		return completion_event;
+		return completion_event
 
 	# De-salting
 	step_timer_start = time.perf_counter()
@@ -109,7 +112,7 @@ def process_ligand(ctx):
 		base_ligand['status_sub'].append(['desalt', { 'state': 'failed', 'text': 'desalting failed' } ])
 		if(ctx['config']['desalting_obligatory'] == "true"):
 			completion_event['seconds'] = time.perf_counter() - start_time
-			return completion_event;
+			return completion_event
 		else:
 			logging.warning("    * Warning: Ligand will be further processed without desalting")
 
@@ -136,6 +139,10 @@ def process_ligand(ctx):
 
 	base_ligand['timers'].append(['neutralization', time.perf_counter() - step_timer_start])
 
+	# Return if this run is for Epik 7 batch protonation
+	if(ctx['config']['protonation_program_1'].endswith("_batch") and 'smi_protomer' not in base_ligand):
+		base_ligand['smi_protomer'] = ''
+		return
 
 	# Stereoisomer generation
 
@@ -278,9 +285,12 @@ def process_stereoisomer(ctx, ligand, stereoisomer, completion_ligands):
 
 def desalt(ctx, ligand):
 
+	if 'smi_desalted' in ligand:
+		return
+
 	ligand['number_of_fragments'] = 1
 	ligand['remarks']['desalting'] = ""
-	if(ctx['config']['desalting'] == "true"):
+	if(ctx['config']['desalting'] == "true" and 'smi_desalted' not in ligand):
 		# Number of fragments in SMILES
 
 		smi_string = get_smi_string(ligand)
@@ -330,7 +340,7 @@ def run_neutralization_instance(ctx, ligand, program):
 			run_obabel_neutralization(ctx, ligand)
 	except RuntimeError as error:
 		ligand['timers'].append([f'{program}_neutralize', time.perf_counter() - step_timer_start])
-		return error
+		raise error
 
 	ligand['timers'].append([f'{program}_neutralize', time.perf_counter() - step_timer_start])
 
@@ -343,11 +353,14 @@ def run_neutralization_generation(ctx, ligand):
 
 def neutralization(ctx, ligand):
 
-	if(ctx['config']['neutralization'] == "true"):
+	if 'smi_neutralized' in ligand:
+		return
+
+	if(ctx['config']['neutralization'] == "true" and 'smi_neutralized' not in ligand):
 		run = 0
 
 		if(ctx['config']['neutralization_mode'] == "always"):
-			run = 1;
+			run = 1
 		elif(ctx['config']['neutralization_mode'] == "only_genuine_desalting" and ligand['number_of_fragments'] > 1):
 			run = 1
 		elif(ctx['config']['neutralization_mode'] == "only_genuine_desalting_and_if_charged" and ligand['number_of_fragments'] > 1):
@@ -398,7 +411,7 @@ def stereoisomer_generation_instance(ctx, ligand, program):
 			ligand['status_sub'].append(['stereoisomer', { 'state': 'success', 'text': '' } ])
 	except RuntimeError as error:
 		ligand['timers'].append([f'{program}_stereoisomer_generation', time.perf_counter() - step_timer_start])
-		return error
+		raise error
 
 	ligand['timers'].append([f'{program}_stereoisomer_generation', time.perf_counter() - step_timer_start])
 
@@ -440,7 +453,7 @@ def tautomerization_instance(ctx, stereoisomer, program):
 			stereoisomer['status_sub'].append(['tautomerization', {'state': 'success', 'text': ''}])
 	except RuntimeError as error:
 		stereoisomer['timers'].append([f'{program}_tautomerize', time.perf_counter() - step_timer_start])
-		return error
+		raise error
 
 	stereoisomer['timers'].append([f'{program}_tautomerize', time.perf_counter() - step_timer_start])
 
@@ -466,7 +479,7 @@ def process_tautomer(ctx, ligand, tautomer):
 
 	if(ctx['config']['protonation_state_generation'] == "true"):
 		try:
-			run_protonation_generation(ctx, tautomer)
+			run_protonation_generation(ctx, tautomer, ligand)
 		except RuntimeError as error:
 			tautomer['status_sub'].append(['protonation', { 'state': 'failed', 'text': f'{str(error)}' } ])
 
@@ -477,7 +490,7 @@ def process_tautomer(ctx, ligand, tautomer):
 				raise
 			else:
 				logging.error("* Warning: Ligand will be further processed without protonation, which might result in unphysiological protonation states.")
-				tautomer['remarks']['protonation'] = "WARNING: Molecule was not protonated at physiological pH (protonation with both obabel and cxcalc has failed)"
+				tautomer['remarks']['protonation'] = f"WARNING: Molecule was not protonated at pH {ctx['config']['protonation_pH_value']} (protonation with both programs has failed)"
 		else:
 			tautomer['status_sub'].append(['protonation', { 'state': 'success', 'text': '' } ])
 
@@ -658,9 +671,9 @@ def generate_target_format(ctx, tautomer, target_format, pdb_file, output_file):
 # Step 4: Protonation
 
 
-def run_protonation_instance(ctx, tautomer, program):
+def run_protonation_instance(ctx, tautomer, program, ligand):
 	step_timer_start = time.perf_counter()
-	valid_programs = ("cxcalc", "obabel", "qupkake")
+	valid_programs = ("cxcalc", "obabel", "qupkake", "epik7_batch")
 
 	if(program == "none"):
 		raise RuntimeError(f"No protonation program remaining")
@@ -674,19 +687,23 @@ def run_protonation_instance(ctx, tautomer, program):
 			run_obabel_protonation(ctx, tautomer)
 		elif(program == "qupkake"):
 			i = 0
-			run_qupkake_protonation(ctx, tautomer, i)
+			smis_protomers_qupkake = []
+			diffs = []
+			run_qupkake_protonation(ctx, tautomer, i, smis_protomers_qupkake, diffs)
+		elif(program == "epik7_batch"):
+			run_epik7_protonation(ctx, tautomer, ligand)
 	except RuntimeError as error:
 		tautomer['timers'].append([f'{program}_protonate', time.perf_counter() - step_timer_start])
-		return error
+		raise error
 
 	tautomer['timers'].append([f'{program}_protonate', time.perf_counter() - step_timer_start])
 
 
-def run_protonation_generation(ctx, tautomer):
+def run_protonation_generation(ctx, tautomer, ligand):
 	try:
-		run_protonation_instance(ctx, tautomer, ctx['config']['protonation_program_1'])
+		run_protonation_instance(ctx, tautomer, ctx['config']['protonation_program_1'], ligand)
 	except RuntimeError as error:
-		run_protonation_instance(ctx, tautomer, ctx['config']['protonation_program_2'])
+		run_protonation_instance(ctx, tautomer, ctx['config']['protonation_program_2'], ligand)
 
 
 #######################
@@ -981,7 +998,7 @@ def run_conformation_generation(ctx, tautomer, output_file):
 
 def run_conformation_instance(ctx, tautomer, program, output_file):
 	step_timer_start = time.perf_counter()
-	valid_programs = ("molconvert", "obabel")
+	valid_programs = ("molconvert", "obabel", "rdkit")
 
 	if(program == "none"):
 		raise RuntimeError(f"No conformation program remaining")
@@ -994,9 +1011,7 @@ def run_conformation_instance(ctx, tautomer, program, output_file):
 		elif(program == "obabel"):
 			obabel_conformation(ctx, tautomer, output_file)
 		elif(program == "rdkit"):
-			# Todo: add RDKit-based conformer generation (ETKDG-based)
-			# https://github.com/rdkit/rdkit/blob/master/Docs/Book/Cookbook.rst#conformer-generation-with-etkdg
-			pass
+			rdkit_conformation(ctx, tautomer, output_file)
 	except RuntimeError as error:
 		tautomer['timers'].append([f'{program}_conformation', time.perf_counter() - step_timer_start])
 		raise error
@@ -1088,20 +1103,22 @@ def generate_remarks(remark_list, remark_order="default", target_format="pdb"):
 #
 
 
-def debug_save_output(ctx, file, stdout="", stderr="", tautomer=None):
+def debug_save_output(ctx, file, stdout="", stderr="", log="", tautomer=None):
 	if(ctx['store_all_intermediate_logs'] == "true"):
 		if(tautomer != None):
-			save_output(tautomer['intermediate_dir'] / file, stdout, stderr)
+			save_output(tautomer['intermediate_dir'] / file, stdout, stderr, log)
 		else:
-			save_output(ctx['intermediate_dir'] / file, stdout, stderr)
+			save_output(ctx['intermediate_dir'] / file, stdout, stderr, log)
 
 
-def save_output(save_logfile, save_stdout, save_stderr):
+def save_output(save_logfile, save_stdout, save_stderr, save_log):
 	with open(save_logfile, "w") as write_file:
 		write_file.write("STDOUT ---------\n")
 		write_file.write(save_stdout)
 		write_file.write("\nSTDERR ---------\n")
 		write_file.write(save_stderr)
+		write_file.write("\nLOG ---------\n")
+		write_file.write(save_log)
 
 
 def get_intermediate_dir_tautomer(ctx, tautomer):
@@ -1141,7 +1158,15 @@ def file_is_empty(filename):
 	return True
 
 
-def rdkit_protonate_atom(mol, atom_idx, pH, pka, pka_type):
+def remove_free_electrons(mol):
+	# Remove radicals
+	for atom in mol.GetAtoms():
+		if atom.GetNumRadicalElectrons() > 0:
+			atom.SetNumRadicalElectrons(0)
+	return mol
+
+
+def rdkit_protonate_atom(mol, atom_idx, ph, pka, pka_type):
 
 	# Define maximum and minimum potential charges for common organic atoms
 	potential_charges = {
@@ -1169,26 +1194,67 @@ def rdkit_protonate_atom(mol, atom_idx, pH, pka, pka_type):
 	else:
 		return mol
 
-	if pH < pka and pka_type == "basic":
+	if ph < pka and pka_type == "basic":
 		# Protonate the atom by adding a hydrogen atom
 		if current_charge < max_charge:
 			atom.SetFormalCharge(current_charge + 1)
 
-	elif pH > pka and pka_type == "acidic":
+	elif ph > pka and pka_type == "acidic":
 		# Deprotonate if possible
 		if current_charge > min_charge:
 			# Get mol with all the hydrogens
 			mol_hs = Chem.AddHs(mol)
 			atom_hs = mol_hs.GetAtomWithIdx(atom_idx)
 
+			# Create a mapping between original atom indices and new indices in the hydrogen-added molecule
+			#atom_mapping = {orig_atom.GetIdx(): hs_atom.GetIdx() for orig_atom, hs_atom in
+			#				zip(mol.GetAtoms(), mol_hs.GetAtoms())}
+
+			# Use the mapping to find the correct atom in the hydrogen-added molecule
+			#if atom_idx in atom_mapping:
+			#	atom_hs_idx = atom_mapping[atom_idx]
+			#	atom_hs = mol_hs.GetAtomWithIdx(atom_hs_idx)
+
 			# Deprotonate the atom by removing a hydrogen atom
 			neighbors = atom_hs.GetNeighbors()
 			for neighbor in neighbors:
 				if neighbor.GetAtomicNum() == 1:  # Check if the neighbor is a hydrogen atom
-					atom.SetFormalCharge(atom.GetFormalCharge() - 1)
+					atom_hs.SetFormalCharge(atom_hs.GetFormalCharge() - 1)
+					mol_hs_edit = Chem.rdchem.EditableMol(mol_hs)
+					mol_hs_edit.RemoveAtom(neighbor.GetIdx())
+					mol = Chem.RemoveHs(mol_hs_edit.GetMol())
 					break
 
 	return mol
+
+
+def schrodinger_license_available(program):
+
+	schrodinger = os.getenv('SCHRODINGER', '')
+	lictool = os.path.join(schrodinger, 'internal', 'bin', 'lictool')
+
+	cmd = [lictool, 'status']
+
+	ret = subprocess.run(cmd, capture_output=True, text=True)
+
+	if ret.returncode != 0:
+		print(f"Failed to check for Schrodinger {program} license, skipping...")
+		return -1
+	else:
+		# Output of the command
+		output = ret.stdout
+
+		# Regular expression to find the line and extract the last number of available licenses
+		pattern = fr'Users of {program}: \(Total of \d+ licenses issued; Total of \d+ licenses in use; Total of (\d+) licenses available\)'
+		match = re.search(pattern, output)
+
+		if match:
+			available_licenses = int(match.group(1))
+			print(f"Total number of licenses available: {available_licenses}")
+			return available_licenses
+		else:
+			print(f"Could not find {program} under the installed licenses, skipping...")
+			return -1
 
 
 ################
@@ -1776,6 +1842,94 @@ def run_rdkit_stereoisomer_generation(ctx, ligand, assigned=True):
 	raise RuntimeError("Stereoisomer generation failed")
 
 
+def rdkit_conformation(ctx, tautomer, output_file):
+	try:
+		ret = func_timeout(int(ctx['config']['rdkit_conformation_timeout']), rdkit_generate_conformation, args=(ctx, tautomer, output_file))
+	except FunctionTimedOut as err:
+		raise RuntimeError(f"rdkit conformer generation timed out") from err
+
+
+def rdkit_generate_conformation(ctx, tautomer, output_file):
+	logging.debug(f"Running rdkit_conformation on smi:'{tautomer['smi_protomer']}")
+
+	output_file_tmp = f"{output_file}.tmp"
+
+	mol = smi2mol(tautomer['smi_protomer'])
+	if mol == '' or mol is None:
+		logging.debug("No mol generated for conformer")
+		raise RuntimeError("No mol generated")
+
+	mol_with_hs = Chem.AddHs(mol)
+
+	params = AllChem.ETKDGv3()
+	params.useSmallRingTorsions = True
+	num_conformers = int(ctx['config']['rdkit_conformation_num'])
+
+	#AllChem.EmbedMolecule(mol_with_hs, AllChem.ETKDGv2())
+	ret = AllChem.EmbedMultipleConfs(mol_with_hs, numConfs=num_conformers, params=params)
+
+	if not len(list(ret)) > 0:
+		logging.debug("No confomers embedded with RDKit")
+		raise RuntimeError("No conformer embedded")
+
+	# Optimize each conformer and calculate its energy
+	energies = []
+	for conf_id in range(num_conformers):
+		AllChem.UFFOptimizeMolecule(mol_with_hs, confId=conf_id)
+		energy = AllChem.UFFGetMoleculeForceField(mol_with_hs, confId=conf_id).CalcEnergy()
+		energies.append((conf_id, energy))
+
+	# Select the conformer with the lowest energy
+	lowest_energy_conf_id = min(energies, key=lambda x: x[1])[0]
+
+	# Write the best conformer to a PDB file
+	with open(output_file_tmp, "w") as f:
+		f.write(Chem.MolToPDBBlock(mol_with_hs, confId=lowest_energy_conf_id))
+
+	if (not os.path.isfile(output_file_tmp)):
+		logging.debug("No pdb file generated in conformation")
+		raise RuntimeError("No pdbfile generated")
+	if (file_is_empty(output_file_tmp)):
+		logging.debug(f"rdkit outputfile is empty. smi: |{tautomer['smi_protomer']}|")
+		raise RuntimeError(f"rdkit outputfile is empty. smi: |{tautomer['smi_protomer']}|")
+
+	if (not nonzero_pdb_coordinates(output_file_tmp)):
+		logging.debug(f"The output PDB file exists but does not contain valid coordinates.")
+		raise RuntimeError("The output PDB file exists but does not contain valid coordinates.")
+
+	tautomer['remarks'][
+		'conformation'] = f"Generation of the 3D conformation was carried out by RDKit"
+	tautomer['remarks']['targetformat'] = "Format generated as part of 3D conformation"
+	# tautomer['remarks']['smiles'] = f"SMILES: {first_smile_component}"
+
+	# Modifying the header of the pdb file and correction of the charges in the pdb file in
+	# order to be conform with the official specifications (otherwise problems with obabel)
+
+	local_remarks = tautomer['remarks'].copy()
+	local_remarks.pop('compound')
+	remark_string = generate_remarks(local_remarks) + "\n"
+
+	line_count = 0
+	with open(output_file, "w") as write_file:
+		write_file.write(f"COMPND    Compound: {tautomer['key']}\n")
+		write_file.write(remark_string)
+		with open(output_file_tmp, "r") as read_file:
+			for line in read_file:
+				line_count += 1
+				if (re.search(r"TITLE|SOURCE|KEYWDS|EXPDTA|COMPND|HEADER|AUTHOR", line)):
+					continue
+				line = re.sub(r"REVDAT.*$", "\n", line)
+				line = re.sub(r"NONE", "", line)
+				line = re.sub(r" UN[LK] ", " LIG ", line)
+				line = re.sub(r"\+0", "", line)
+				line = re.sub(r"([+-])([0-9])$", r"\2\1", line)
+				if (re.search(r"^\s*$", line)):
+					continue
+				write_file.write(line)
+
+	logging.debug("success for rdkit_conformation")
+
+
 # Step 3b: Tautomerization by OBabel
 
 def run_obabel_tautomer_generation(ctx, stereoisomer):
@@ -1819,11 +1973,19 @@ def run_obabel_protonation(ctx, tautomer):
 		'-ismi', input_file,
 		'-osmi', '-O', output_file
 	]
+	try:
+		tautomer['smi_protomer'] = run_obabel_general_get_value(cmd, output_file, timeout=ctx['config']['obabel_protonation_timeout'])
+	except RuntimeError as error:
+		print("Protonation state generation failed")
+		raise error
 
-	tautomer['smi_protomer'] = run_obabel_general_get_value(cmd, output_file, timeout=ctx['config']['obabel_protonation_timeout'])
+	logging.debug(f"succesful protonation with obabel for {tautomer['key']}")
+	tautomer['remarks'][
+		'protonation'] = f"Protonation state was generated at pH {ctx['config']['protonation_pH_value']} by Open Babel."
+	logging.debug(f"smi_protomer is {tautomer['smi_protomer']}")
 
 
-def run_qupkake_protonation(ctx, tautomer, i):
+def run_qupkake_protonation(ctx, tautomer, i, smis_protomers_qupkake, diffs):
 
 	if i == 0:
 		qupkake_sdf_filename = f"qupkake.proto.{tautomer['key']}_output.sdf"
@@ -1832,12 +1994,12 @@ def run_qupkake_protonation(ctx, tautomer, i):
 
 	cmd = [
 		'conda', 'run', '-n', ctx['config']['qupkake_conda_env'],
-		'qupkake', 'smi',  tautomer['smi'], '-mp', '1',
+		'qupkake', 'smi',  tautomer['smi'], '-t', '-mp', '0',
 		'-n', tautomer['key'], '-o', qupkake_sdf_filename,
-		'-r', ctx['temp_dir'].name
+		'-r', tautomer['intermediate_dir']
 	]
 
-	qupkake_sdf_filepath = os.path.join(ctx['temp_dir'].name, 'output', qupkake_sdf_filename)
+	qupkake_sdf_filepath = tautomer['intermediate_dir'] / "output" / qupkake_sdf_filename
 
 	try:
 		ret = subprocess.run(cmd, capture_output=True, text=True, timeout=int(ctx['config']['qupkake_protonation_timeout']))
@@ -1846,13 +2008,15 @@ def run_qupkake_protonation(ctx, tautomer, i):
 
 	output_lines = ret.stdout.splitlines()
 
+	debug_save_output(stdout=ret.stdout, stderr=ret.stderr, ctx=ctx, tautomer=tautomer, file="qupkake_protonate")
+
 	if len(output_lines) == 0 or not os.path.isfile(qupkake_sdf_filepath):
 		raise RuntimeError(f"No output from qupkake")
 
 	else:
 		try:
 			qupkake_mol_supplier = Chem.SDMolSupplier(qupkake_sdf_filepath)
-		except:
+		except Exception:
 			raise RuntimeError(f"No or incorrect output file from qupkake")
 
 		mol = smi2mol(tautomer['smi'])
@@ -1882,9 +2046,10 @@ def run_qupkake_protonation(ctx, tautomer, i):
 		pka_values_basic = sorted(pka_values_basic, key=lambda x: x[0], reverse=True)
 		pka_values_acidic = sorted(pka_values_acidic, key=lambda x: x[0], reverse=False)
 
-		mol_previous = mol
+		mol_previous_smi = mol2smi(mol)
+		smis_protomers_qupkake.append(mol_previous_smi)
 
-		while mol2smi(mol) == mol2smi(mol_previous):
+		while mol2smi(mol) == mol_previous_smi:
 
 			if len(pka_values_basic) != 0:
 				diff_basic = pka_values_basic[0][0] - float(ctx['config']['protonation_pH_value'])
@@ -1898,21 +2063,202 @@ def run_qupkake_protonation(ctx, tautomer, i):
 
 			if diff_basic <= 0 and diff_acidic <= 0:
 				tautomer['smi_protomer'] = mol2smi(mol)
+				logging.debug(f"succesful protonation with cxcalc for {tautomer['key']}")
 				return
 
 			elif diff_basic > diff_acidic or diff_basic == diff_acidic:
-				mol = rdkit_protonate_atom(mol, pka_values_basic[0][2], float(ctx['config']['protonation_pH_value']),
+				diffs.append(diff_basic)
+				try:
+					mol = rdkit_protonate_atom(mol, pka_values_basic[0][2], float(ctx['config']['protonation_pH_value']),
 										   pka_values_basic[0][0], pka_values_basic[0][1])
-				pka_values_basic.pop(0)
+					pka_values_basic.pop(0)
+					if i > 0 and mol2smi(mol) in smis_protomers_qupkake:
+						if diffs[smis_protomers_qupkake.index(mol2smi(mol))] > diffs[i]:
+							tautomer['smi_protomer'] = smis_protomers_qupkake[smis_protomers_qupkake.index(mol2smi(mol))]
+						else:
+							tautomer['smi_protomer'] = smis_protomers_qupkake[i]
+						logging.debug(f"succesful protonation with cxcalc for {tautomer['key']}")
+						return
+				except Exception:
+					raise RuntimeError(f"Protonation state generation failed")
 
 			elif diff_acidic > diff_basic:
-				mol = rdkit_protonate_atom(mol, pka_values_acidic[0][2], float(ctx['config']['protonation_pH_value']),
+				diffs.append(diff_acidic)
+				try:
+					mol = rdkit_protonate_atom(mol, pka_values_acidic[0][2], float(ctx['config']['protonation_pH_value']),
 											   pka_values_acidic[0][0], pka_values_acidic[0][1])
-				pka_values_acidic.pop(0)
+					pka_values_acidic.pop(0)
+					if i > 0 and mol2smi(mol) in smis_protomers_qupkake:
+						if diffs[smis_protomers_qupkake.index(mol2smi(mol))] > diffs[i]:
+							tautomer['smi_protomer'] = smis_protomers_qupkake[smis_protomers_qupkake.index(mol2smi(mol))]
+						else:
+							tautomer['smi_protomer'] = smis_protomers_qupkake[i]
+						logging.debug(f"succesful protonation with cxcalc for {tautomer['key']}")
+						return
+				except Exception:
+					raise RuntimeError(f"Protonation state generation failed")
 
 		i += 1
 		tautomer['smi'] = mol2smi(mol)
-		run_qupkake_protonation(ctx, tautomer, i)
+		smis_protomers_qupkake.append(tautomer['smi'])
+		run_qupkake_protonation(ctx, tautomer, i, smis_protomers_qupkake, diffs)
+
+
+'''
+def run_epik7_protonation(ctx, tautomer):
+
+	input_file = f"{tautomer['intermediate_dir']}/epik.proto.{tautomer['key']}_input.smi"
+	output_file = f"{tautomer['intermediate_dir']}/epik.proto.{tautomer['key']}_output.smi"
+
+	# Output the SMI to a temp input file
+	write_file_single(input_file, tautomer['smi'])
+
+	schrodinger = os.getenv('SCHRODINGER', '')
+	if schrodinger == '':
+		raise RuntimeError(f"no schrodinger env set")
+	else:
+		epikx = os.path.join(schrodinger, 'epikx')
+
+	cmd = [
+		epikx,
+		'-ph', ctx['config']['protonation_pH_value'],
+		'-pht', '0', '-ms', '1',
+		'-WAIT' + ctx['config']['epik7_protonation_options'],
+		input_file,
+		output_file
+		]
+
+	cwd = os.getcwd()
+	os.chdir(tautomer['intermediate_dir'])
+
+	try:
+		ret = subprocess.run(cmd, capture_output=True, text=True, timeout=int(ctx['config']['epik7_protonation_timeout']))
+	except subprocess.TimeoutExpired as err:
+		raise RuntimeError(f"epik7 timed out") from err
+
+	os.chdir(cwd)
+
+	debug_save_output(stdout=ret.stdout, stderr=ret.stderr, tautomer=tautomer, ctx=ctx, file="epik7_protonation")
+
+	output_lines = ret.stdout.splitlines()
+
+	if (len(output_lines) == 0):
+		raise RuntimeError(f"No output from epik7")
+	else:
+		try:
+			with open(output_file, "r") as read_file:
+				tautomer['smi_protomer'] = read_file.readline().strip()
+		except Exception:
+			raise RuntimeError(f"Protonation state generation failed")
+
+	logging.debug(f"succesful protonation with epik7 for {tautomer['key']}")
+
+	tautomer['remarks'][
+		'protonation'] = f"Protonation state was generated at pH {ctx['config']['protonation_pH_value']} by Epik 7 from Schrodinger"
+	logging.debug(f"smi_protomer is {tautomer['smi_protomer']}")
+	return
+'''
+
+
+def run_epik7_protonation(ctx, tautomer, ligand):
+
+	if ligand.get('smi_protomer'):
+		try:
+			tautomer['smi_protomer'] = ligand['smi_protomer']
+		except Exception:
+			raise RuntimeError(f"Protonation state generation failed")
+
+		logging.debug(f"succesful protonation with epik7 for {tautomer['key']}")
+
+		tautomer['remarks'][
+			'protonation'] = f"Protonation state was generated at pH {ctx['config']['protonation_pH_value']} by Epik 7 from Schrodinger"
+		logging.debug(f"smi_protomer is {tautomer['smi_protomer']}")
+		return
+
+	raise RuntimeError(f"No output from epik7")
+
+
+def run_epik7_protonation_batch(ctx, collection_temp_file, tasklist):
+
+	output_file = collection_temp_file + '_out.csv'
+
+	schrodinger = os.getenv('SCHRODINGER', '')
+	if schrodinger == '':
+		raise RuntimeError(f"no schrodinger env set")
+	else:
+		epikx = os.path.join(schrodinger, 'epikx')
+
+	cmd = [
+		'-ph', tasklist[0]['config']['protonation_pH_value'],
+		'-pht', '0.5', '-ms', '1'
+	]
+
+	if tasklist[0]['config']['epik7_protonation_options'] != "":
+		cmd.append(tasklist[0]['config']['epik7_protonation_options'])
+
+	cmd.insert(0, epikx)
+	cmd.extend([
+		'-WAIT',
+		collection_temp_file,
+		output_file
+	])
+
+	cwd = os.getcwd()
+	os.chdir(tasklist[0]['collection_temp_dir'].name)
+
+	try:
+		ret = subprocess.run(cmd, capture_output=True, text=True,
+							 timeout=int(tasklist[0]['config']['epik7_protonation_timeout']))
+	except subprocess.TimeoutExpired as err:
+		raise RuntimeError(f"epik7 timed out") from err
+
+	os.chdir(cwd)
+
+	# Get epik7 log
+	log = ""
+	logfile = str(Path(output_file).with_suffix('.log'))
+	if os.path.isfile(logfile):
+		with open(logfile, "r") as read_file:
+			lines = read_file.readlines()
+		log = ''.join(lines)
+
+	# Intermediate log storage
+	output_file_parts = [
+		tasklist[0]['collection_temp_dir'].name,
+		"intermediate",
+		tasklist[0]['metatranche'],
+		tasklist[0]['tranche'],
+		tasklist[0]['collection_name']
+	]
+
+	output_dir = Path("/".join(output_file_parts))
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	ctx['intermediate_dir'] = output_dir
+	ctx['store_all_intermediate_logs'] = tasklist[0]['config']['store_all_intermediate_logs']
+
+	debug_save_output(stdout=ret.stdout, stderr=ret.stderr, log=log, ctx=ctx, file="epik7_protonation")
+
+	output_lines = ret.stdout.splitlines()
+
+	if (len(output_lines) == 0):
+		raise RuntimeError(f"No output from epik7")
+	else:
+		try:
+			df = pd.read_csv(output_file)
+			for taskitem in tasklist:
+				if taskitem['ligand_key'] in df['NAME'].values:
+					taskitem['ligand']['smi_protomer'] = df[df['NAME'] == taskitem['ligand_key']]['SMILES'].values[0]
+					taskitem['ligand']['smi_desalted'] = taskitem['ligand']['smi_protomer']
+					taskitem['ligand']['smi_neutralized'] = taskitem['ligand']['smi_protomer']
+				#else:
+				#	taskitem['ligand']['smi_protomer'] = ''
+		except Exception:
+			raise RuntimeError(f"Protonation state generation failed")
+
+	logging.debug(f"succesful batch protonation with epik7 for collection")
+
+	return
 
 
 # Step 3b: Tautomerization by RDKit
@@ -2289,15 +2635,18 @@ def obabel_generate_targetformat(ctx, tautomer, target_format, input_pdb_file, o
 def run_rdkit_attributes(ctx, tautomer, smi, attributes_to_gen, attributes):
 
 	step_timer_start = time.perf_counter()
-
 	mol = rdkit.Chem.MolFromSmiles(smi)
 
-	for attr in attributes_to_gen:
-		if(attr in attributes and attributes[attr]['prog'] == "rdkit"):
-			if(attr == "qed_rdkit"):
-				attributes[attr]['val'] = rdkit.Chem.QED.qed(mol)
-			elif(attr == "scaffold_rdkit"):
-				attributes[attr]['val'] = rdkit.Chem.MolToSmiles(rdkit.Chem.Scaffolds.MurckoScaffold.GetScaffoldForMol(mol),canonical=True)
+	if mol is None:
+		logging.warning(f"    * Warning: Could not generate rdkit attributes for {tautomer['key']}.")
+
+	else:
+		for attr in attributes_to_gen:
+			if(attr in attributes and attributes[attr]['prog'] == "rdkit"):
+				if(attr == "qed_rdkit"):
+					attributes[attr]['val'] = rdkit.Chem.QED.qed(mol)
+				elif(attr == "scaffold_rdkit"):
+					attributes[attr]['val'] = rdkit.Chem.MolToSmiles(rdkit.Chem.Scaffolds.MurckoScaffold.GetScaffoldForMol(mol),canonical=True)
 
 	tautomer['timers'].append(['rdkit_attributes', time.perf_counter() - step_timer_start])
 
@@ -2628,6 +2977,26 @@ def process_collection(ctx, collection_key, collection, collection_data):
 
 	start_time = datetime.now()
 
+	if ctx['main_config']['protonation_program_1'] == "epik7_batch":
+
+		for taskitem in tasklist:
+			process_ligand(taskitem)
+
+		collection_temp_file = os.path.join(collection_temp_dir.name, f"{collection['collection_name']}.csv")
+
+		with open(collection_temp_file, 'w', newline='') as f:
+			writer = csv.DictWriter(f, fieldnames=['smi', 'ligand-name'], delimiter=',')
+			for taskitem in tasklist:
+				row = {'smi': taskitem['ligand']['smi_neutralized'], 'ligand-name': taskitem['ligand_key']}
+				writer.writerow(row)
+
+		if schrodinger_license_available('EPIK_MAIN') < 0:
+			print(f"Could not check for schrodinger license, skipping batch protonation with Epik 7...")
+		else:
+			while schrodinger_license_available('EPIK_MAIN') == 0:
+				time.sleep(3)
+			run_epik7_protonation_batch(ctx, collection_temp_file, tasklist)
+
 	res = []
 
 	if(ctx['run_sequential'] == 1):
@@ -2637,7 +3006,7 @@ def process_collection(ctx, collection_key, collection, collection_data):
 		with multiprocessing.Pool(processes=ctx['vcpus_to_use']) as pool:
 			res = pool.map(process_ligand, tasklist)
 
-	end_time  = datetime.now()
+	end_time = datetime.now()
 	difference_time = end_time - start_time
 
 	print(f"time difference is: {difference_time.seconds} seconds")
