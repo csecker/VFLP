@@ -306,7 +306,7 @@ def desalt(ctx, ligand):
 			# need to desalt
 			sorted_smi_string_parts = sorted(smi_string_parts, key=len)
 			ligand['smallest_fragment'] = sorted_smi_string_parts[0]
-			ligand['largest_fragment'] = sorted_smi_string_parts[1]
+			ligand['largest_fragment'] = sorted_smi_string_parts[-1]
 			ligand['number_of_fragments'] = len(smi_string_parts)
 			ligand['status_sub'].append(['desalt', { 'state': 'success', 'text': 'genuine' } ])
 			ligand['remarks']['desalting'] = "The ligand was desalted by extracting the largest organic fragment (out of {len(smi_string_parts)}) from the original structure."
