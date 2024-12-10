@@ -1816,7 +1816,7 @@ def run_rdkit_stereoisomer_generation(ctx, ligand, assigned=True):
 	m = Chem.MolFromSmiles(ligand['smi_neutralized'])
 
 	if m is None or m == "":
-		return
+		raise RuntimeError("Stereoisomer generation failed")
 
 	if assigned == True:  # Faster
 		opts = StereoEnumerationOptions(unique=True, tryEmbedding=True, maxIsomers=int(ctx['config']['rdkit_stereoisomer_max_count']))
@@ -1839,7 +1839,7 @@ def run_rdkit_stereoisomer_generation(ctx, ligand, assigned=True):
 	else:
 		raise RuntimeError("No output for stereoisomer state generation")
 
-	raise RuntimeError("Stereoisomer generation failed")
+
 
 
 def rdkit_conformation(ctx, tautomer, output_file):
@@ -1874,7 +1874,8 @@ def rdkit_generate_conformation(ctx, tautomer, output_file):
 
 	# Optimize each conformer and calculate its energy
 	energies = []
-	for conf_id in range(num_conformers):
+	for conf_id in range(len(list(ret))):
+		# Todo: Catch value error
 		AllChem.UFFOptimizeMolecule(mol_with_hs, confId=conf_id)
 		energy = AllChem.UFFGetMoleculeForceField(mol_with_hs, confId=conf_id).CalcEnergy()
 		energies.append((conf_id, energy))
