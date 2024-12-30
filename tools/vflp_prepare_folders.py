@@ -190,6 +190,10 @@ def check_parameters(config):
             if(empty_value(config, 'job_storage_mode') or config['job_storage_mode'] != "sharedfs"):
                 print("* 'job_storage_mode' must be set to 'sharedfs' batchsystem is 'slurm'")
                 error = 1
+        elif (config['batchsystem'] == "bash"):
+            if (empty_value(config, 'bash_template')):
+                print("* 'bash_template' must be set if batchsystem is 'bash'")
+                error = 1
         else:
             print(f"* batchsystem '{config['batchsystem']}' is not supported. Only awsbatch and slurm are supported")
 

@@ -89,6 +89,13 @@ slurm_array_job_size=1
 slurm_job_submission_timeout=10
 # Timeout for submission of slurm jobs
 
+****** Bash Options (if batchsystem=bash)
+
+bash_template=./templates/template1.bash
+# Template for the bash script used
+
+bash_array_job_size=100
+# How many to group under a single workunit
 
 ************************************************
 ** Storage configuration

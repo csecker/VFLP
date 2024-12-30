@@ -24,6 +24,11 @@
 # section should be changed
 ##################################################################################
 
+# If you are using a virtualenv, make sure the correct one
+# is being activated
+
+source $HOME/vflp_env/bin/activate
+
 # deletes the temp directory
 function cleanup {
   rm -rf ${VFLP_PKG_TMP_DIR}
@@ -37,6 +42,10 @@ export VFLP_JOB_STORAGE_MODE={{job_storage_mode}}
 export VFLP_TMP_PATH=/dev/shm
 export VFLP_CONFIG_JOB_TGZ={{job_tgz}}
 export VFLP_VCPUS={{threads_to_use}}
+
+##################################################################################
+
+cd ../../../tools || exit | exit
 
 export VFLP_WORKFLOW_DIR=$(readlink --canonicalize ..)/workflow
 export VFLP_CONFIG_JSON=${VFLP_WORKFLOW_DIR}/config.json
