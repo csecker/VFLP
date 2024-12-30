@@ -1,5 +1,28 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
+# Copyright (C) 2019 Christoph Gorgulla
+# Copyright (C) 2024 Christopher Secker
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# This file is part of VirtualFlow.
+#
+# VirtualFlow is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 2 of the License, or
+# (at your option) any later version.
+#
+# VirtualFlow is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with VirtualFlow.  If not, see <https://www.gnu.org/licenses/>.
+
+
+# Job Information -- generally nothing in this
+# section should be changed
+##################################################################################
 
 # deletes the temp directory
 function cleanup {
@@ -9,16 +32,17 @@ function cleanup {
 
 trap cleanup EXIT
 
-export VFLP_JOB_STORAGE_MODE=sharedfs
-export VFLP_VCPUS=4
-export VFLP_WORKUNIT=1
-export VFLP_WORKUNIT_SUBJOB=0
-export VFLP_RUN_SEQUENTIAL=0
+export VFLP_WORKUNIT={{workunit_id}}
+export VFLP_JOB_STORAGE_MODE={{job_storage_mode}}
+export VFLP_TMP_PATH=/dev/shm
+export VFLP_CONFIG_JOB_TGZ={{job_tgz}}
+export VFLP_VCPUS={{threads_to_use}}
 
 export VFLP_WORKFLOW_DIR=$(readlink --canonicalize ..)/workflow
-
 export VFLP_CONFIG_JSON=${VFLP_WORKFLOW_DIR}/config.json
 export VFLP_WORKUNIT_JSON=${VFLP_WORKFLOW_DIR}/workunits/${VFLP_WORKUNIT}.json.gz
+
+##################################################################################
 
 VFLP_PKG_BASE=$(readlink --canonicalize .)/packages
 VFLP_PKG_TMP_DIR=$(mktemp -d)
@@ -53,6 +77,12 @@ fi
 export CLASSPATH="${VFLP_PKG_TMP_DIR}/nailgun/nailgun-server/target/classes:${VFLP_PKG_TMP_DIR}/nailgun/nailgun-examples/target/classes:${VFLP_PKG_TMP_DIR}/jchemsuite/lib/*"
 export PATH="${VFLP_PKG_TMP_DIR}/java/bin:${VFLP_PKG_TMP_DIR}/nailgun/nailgun-client/target/:$PATH"
 
-env
+##################################################################################
 
-./vflp_run.py
+for i in `seq 0 {{array_end}}`; do
+	export VFLP_WORKUNIT_SUBJOB=${i}
+	echo "Workunit ${VFLP_WORKUNIT}:${VFLP_WORKUNIT_SUBJOB}: output in {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.out"
+	date +%s > {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.start
+	./vflp_run.py &> {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.out
+	date +%s > {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.end
+done
