@@ -45,8 +45,6 @@ export VFLP_VCPUS={{threads_to_use}}
 
 ##################################################################################
 
-cd ../../../tools || exit | exit
-
 export VFLP_WORKFLOW_DIR=$(readlink --canonicalize ..)/workflow
 export VFLP_CONFIG_JSON=${VFLP_WORKFLOW_DIR}/config.json
 export VFLP_WORKUNIT_JSON=${VFLP_WORKFLOW_DIR}/workunits/${VFLP_WORKUNIT}.json.gz
@@ -90,8 +88,8 @@ export PATH="${VFLP_PKG_TMP_DIR}/java/bin:${VFLP_PKG_TMP_DIR}/nailgun/nailgun-cl
 
 for i in `seq 0 {{array_end}}`; do
 	export VFLP_WORKUNIT_SUBJOB=${i}
-	echo "Workunit ${VFLP_WORKUNIT}:${VFLP_WORKUNIT_SUBJOB}: output in {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.out"
+	echo "Workunit ${VFLP_WORKUNIT}:${VFLP_WORKUNIT_SUBJOB}: stdout in {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.out, stderr in {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.err"
 	date +%s > {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.start
-	./vflp_run.py &> {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.out
+	./vflp_run.py > {{batch_workunit_base}}/$$_${VFLP_WORKUNIT_SUBJOB}.out 2> {{batch_workunit_base}}/$$_${VFLP_WORKUNIT_SUBJOB}.err
 	date +%s > {{batch_workunit_base}}/${VFLP_WORKUNIT_SUBJOB}.end
 done

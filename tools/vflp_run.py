@@ -1813,6 +1813,9 @@ def run_rdkit_stereoisomer_generation(ctx, ligand, assigned=True):
 	local_file = ctx['intermediate_dir'] / "neutralized.smi"
 	write_file_single(local_file, ligand['smi_neutralized'])
 
+	# Todo: Exception handling / Timeout for EnumerateStereoisomers (EmbedMolecule)
+	# Example compound with problem: O=C(NC1C2C3CC4C5CC(C2C35)C14)C1CCC(C1)n1cc(nn1)-c1cccc2cnccc12
+
 	m = Chem.MolFromSmiles(ligand['smi_neutralized'])
 
 	if m is None or m == "":

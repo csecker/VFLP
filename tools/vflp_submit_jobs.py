@@ -90,8 +90,33 @@ def run_bash(config, current_workunit, jobline):
 		print(f"Cannot write the workunit bash file ({batch_submit_file})")
 		raise error
 
-	with open("../workflow/run.bash", "a") as bash_out:
-		bash_out.write(f"{batch_submit_file}\n")
+	try:
+		with open("../workflow/run.bash", "a") as bash_out:
+			bash_out.write(f"bash {batch_submit_file}\n")
+	except IOError as error:
+		print(f"Cannot write the workflow bash file")
+		raise error
+
+	cmd = [
+		"bash",
+		batch_submit_file
+	]
+
+	try:
+		ret = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	except subprocess.TimeoutExpired as err:
+		raise Exception("timeout on submission to bash")
+
+	ret.wait()
+
+	current_workunit['status'] = {
+		'vf_job_status': 'SUBMITTED',
+		'job_name': f"vflp-{config['job_letter']}-{jobline_str}",
+		'job_id': ret.pid
+	}
+
+	# Slow ourselves down a bit
+	time.sleep(0.1)
 	
 def submit_slurm(config, client, current_workunit, jobline):
 
