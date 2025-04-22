@@ -1228,12 +1228,12 @@ def rdkit_protonate_atom(mol, atom_idx, ph, pka, pka_type):
 	return mol
 
 
-def schrodinger_license_available(program):
+def schrodinger_license_available(program, ctx):
 
 	schrodinger = os.getenv('SCHRODINGER', '')
 	lictool = os.path.join(schrodinger, 'internal', 'bin', 'lictool')
 
-	cmd = [lictool, 'status']
+	cmd = [lictool, 'status', '--licsrv-hostport', ctx['main_config']['schrodinger_license_server_hostport']]
 
 	ret = subprocess.run(cmd, capture_output=True, text=True)
 
@@ -2994,10 +2994,10 @@ def process_collection(ctx, collection_key, collection, collection_data):
 				row = {'smi': taskitem['ligand']['smi_neutralized'], 'ligand-name': taskitem['ligand_key']}
 				writer.writerow(row)
 
-		if schrodinger_license_available('EPIK_MAIN') < 0:
+		if schrodinger_license_available('EPIK_MAIN', ctx) < 0:
 			print(f"Could not check for schrodinger license, skipping batch protonation with Epik 7...")
 		else:
-			while schrodinger_license_available('EPIK_MAIN') == 0:
+			while schrodinger_license_available('EPIK_MAIN', ctx) == 0:
 				time.sleep(3)
 			run_epik7_protonation_batch(ctx, collection_temp_file, tasklist)
 

@@ -680,3 +680,11 @@ java_max_heap_size=4
 # Recommended: >= 1 GB * queues_per_step
 # The required memory depends mainly on how many queues are run per step (and thus per JVM/NG server), since one JVM is used per step
 
+
+****** Schrodinger-related Packages
+
+schrodinger_license_server_hostport=none
+# Required only if epik7 (Schrodinger) is used in the preparation steps.
+# The license server must be reachable from the compute nodes.
+# Possible values:
+#   * <hostname>:<port>
