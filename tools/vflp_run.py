@@ -691,7 +691,7 @@ def run_protonation_instance(ctx, tautomer, program, ligand):
 			diffs = []
 			run_qupkake_protonation(ctx, tautomer, i, smis_protomers_qupkake, diffs)
 		elif(program == "epik7_batch"):
-			run_epik7_protonation(ctx, tautomer, ligand)
+			pass
 	except RuntimeError as error:
 		tautomer['timers'].append([f'{program}_protonate', time.perf_counter() - step_timer_start])
 		raise error
@@ -1257,6 +1257,146 @@ def schrodinger_license_available(program, ctx):
 			return -1
 
 
+def is_potential_chiral_center(atom: Chem.Atom) -> bool:
+	"""
+	Robustly check if 'atom' can be a tetrahedral stereocenter.
+	Prefer RDKit's own chiral-center finding; fall back to local heuristics if needed.
+	"""
+	mol = atom.GetOwningMol()
+	idx = atom.GetIdx()
+
+	# Use RDKit's chiral center perception first (includes unassigned)
+	chiral_centers = Chem.FindMolChiralCenters(
+		mol, force=True, includeUnassigned=True, useLegacyImplementation=False
+	)
+	if any(ci == idx for ci, _ in chiral_centers):
+		return True
+
+	# Fallback heuristic close to your original approach
+	if atom.GetHybridization() != Chem.HybridizationType.SP3:
+		return False
+	neighbors = atom.GetNeighbors()
+	if len(neighbors) != 4:
+		return False
+	labels = []
+	for nbr in neighbors:
+		bond = mol.GetBondBetweenAtoms(atom.GetIdx(), nbr.GetIdx())
+		labels.append((nbr.GetAtomicNum(), bond.GetBondType()))
+	return len(set(labels)) == 4
+
+
+def _capture_original_atom_stereo(mol: Chem.Mol):
+	"""
+	Return a dict: idx -> {'cip': 'R'/'S', 'tag': ChiralType or CHI_UNSPECIFIED}
+	Only for atoms that currently have a CIP assignment.
+	"""
+	Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+	stereo = {}
+	for atom in mol.GetAtoms():
+		if atom.HasProp('_CIPCode'):
+			cip = atom.GetProp('_CIPCode')  # 'R' or 'S'
+			stereo[atom.GetIdx()] = {
+				'cip': cip,
+				'tag': atom.GetChiralTag(),  # CHI_TETRAHEDRAL_CW/CCW/UNSPECIFIED
+			}
+	return stereo
+
+
+def _capture_original_bond_stereo(mol: Chem.Mol):
+	"""
+	Return a dict: (i, j) sorted tuple -> 'E'/'Z'
+	Only for double bonds that currently have E/Z assignment.
+	"""
+	bond_stereo = {}
+	for b in mol.GetBonds():
+		if b.GetBondType() == Chem.BondType.DOUBLE:
+			st = b.GetStereo()
+			if st == Chem.BondStereo.STEREOE:
+				key = tuple(sorted((b.GetBeginAtomIdx(), b.GetEndAtomIdx())))
+				bond_stereo[key] = 'E'
+			elif st == Chem.BondStereo.STEREOZ:
+				key = tuple(sorted((b.GetBeginAtomIdx(), b.GetEndAtomIdx())))
+				bond_stereo[key] = 'Z'
+	return bond_stereo
+
+
+def _match_atom_cip_by_flipping_if_needed(mol: Chem.Mol, atom_idx: int, target_cip: str):
+	"""
+	Ensure atom_idx has target CIP ('R'/'S') if possible:
+	  - If the atom is still a potential stereocenter, and has a CIP assignment:
+		- If CIP != target, try flipping between CW/CCW, reassign, and keep flip if it matches.
+	  - If no CIP assignment but the atom is potentially chiral, try to set a reasonable tag and assign.
+	If matching is impossible (e.g., lost stereocenter or ambiguous), leave as-is.
+	"""
+	atom = mol.GetAtomWithIdx(atom_idx)
+
+	if not is_potential_chiral_center(atom):
+		return  # not a stereocenter anymore; do nothing
+
+	# Force perception
+	Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+
+	has_cip = atom.HasProp('_CIPCode')
+	if has_cip and atom.GetProp('_CIPCode') == target_cip:
+		return  # already matches
+
+	# If we don't have a tag, try setting one based on current perception
+	cur_tag = atom.GetChiralTag()
+	if cur_tag == Chem.ChiralType.CHI_UNSPECIFIED:
+		# Default to CW and see if that yields the target CIP; if not, try CCW.
+		for trial_tag in (Chem.ChiralType.CHI_TETRAHEDRAL_CW, Chem.ChiralType.CHI_TETRAHEDRAL_CCW):
+			atom.SetChiralTag(trial_tag)
+			Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+			if atom.HasProp('_CIPCode') and atom.GetProp('_CIPCode') == target_cip:
+				return
+		# If neither worked, revert to unspecified and leave it
+		atom.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
+		Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+		return
+
+	# If we do have a tag, try flipping it once
+	flipped = {
+		Chem.ChiralType.CHI_TETRAHEDRAL_CW: Chem.ChiralType.CHI_TETRAHEDRAL_CCW,
+		Chem.ChiralType.CHI_TETRAHEDRAL_CCW: Chem.ChiralType.CHI_TETRAHEDRAL_CW,
+	}
+	if cur_tag in flipped:
+		# Try current tag first (maybe CIP priorities changed and it already matches after reassign)
+		if atom.HasProp('_CIPCode') and atom.GetProp('_CIPCode') == target_cip:
+			return
+		# Flip and test
+		atom.SetChiralTag(flipped[cur_tag])
+		Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+		if atom.HasProp('_CIPCode') and atom.GetProp('_CIPCode') == target_cip:
+			return
+		# If flipping didn't match, revert to original tag
+		atom.SetChiralTag(cur_tag)
+		Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+
+
+def _try_preserve_bond_ez(mol: Chem.Mol, original_bond_ez: dict):
+	"""
+	Attempt to preserve E/Z for double bonds where it still applies.
+	Only changes bonds that currently have double bond stereo assigned.
+	"""
+	# Force RDKit to assign geometric stereo first
+	Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+	for (i, j), target in original_bond_ez.items():
+		b = mol.GetBondBetweenAtoms(i, j)
+		if b is None:
+			continue
+		if b.GetBondType() != Chem.BondType.DOUBLE:
+			continue
+
+		cur = b.GetStereo()
+		# Only attempt to set when stereo is already defined; if not defined,
+		# setting it without stereo atoms defined may be ignored by RDKit.
+		if cur in (Chem.BondStereo.STEREOE, Chem.BondStereo.STEREOZ):
+			desired = Chem.BondStereo.STEREOE if target == 'E' else Chem.BondStereo.STEREOZ
+			if cur != desired:
+				b.SetStereo(desired)
+				Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+
+
 ################
 # ChemAxon Components
 
@@ -1734,22 +1874,22 @@ def run_obabel_neutralization(ctx, ligand):
 
 def perform_isomer_unique_correction(ctx, sterio_smiles_ls):
 
-	'''
-    When RDkit enumerates sterio-isomers, some of them can be redundant.
-    To resolve this, we use obabel to convert them into 3D, convert back to
-    canonical smiles, and, use this as the final list of stereoisomer smiles
-    for a particular molecule.
+	"""
+	When RDkit enumerates sterio-isomers, some of them can be redundant.
+	To resolve this, we use obabel to convert them into 3D, convert back to
+	canonical smiles, and, use this as the final list of stereoisomer smiles
+	for a particular molecule.
 
-    Parameters
-    ----------
-    sterio_smiles_ls : list of strings
-        A list of valid SMILES strings.
+	Parameters
+	----------
+	sterio_smiles_ls : list of strings
+		A list of valid SMILES strings.
 
-    Returns
-    -------
-    isomers_canon : list of strings
-        A list of valid SMILES strings, containing the corrected smiles!.
-    '''
+	Returns
+	-------
+	isomers_canon : list of strings
+		A list of valid SMILES strings, containing the corrected smiles!.
+	"""
 
 	smi_file = ctx['intermediate_dir'] / "sterio.smi"
 	sdf_file = ctx['intermediate_dir'] / "sterio.sdf"
@@ -1786,26 +1926,26 @@ def perform_isomer_unique_correction(ctx, sterio_smiles_ls):
 
 
 def run_rdkit_stereoisomer_generation(ctx, ligand, assigned=True):
-	'''
-    Enumerate all stereoisomers of the provided molecule SMILES string.
-    Note: Only unspecified stereocenters are expanded.
+	"""
+	Enumerate all stereoisomers of the provided molecule SMILES string.
+	Note: Only unspecified stereocenters are expanded.
 
-    Parameters
-    ----------
-    smi : str
-         Valid molecule SMILE string.
-    assigned: bool
-         if True, isomers will be generated for only the unasigned stereo-locations
-                  for a smile (faster)
-         if False, all isomer combinations will be generated, regardless of what is
-                  specified in the input smile (slower)
+	Parameters
+	----------
+	smi : str
+		 Valid molecule SMILE string.
+	assigned: bool
+		 if True, isomers will be generated for only the unasigned stereo-locations
+				  for a smile (faster)
+		 if False, all isomer combinations will be generated, regardless of what is
+				  specified in the input smile (slower)
 
-    Returns
-    -------
-    stereo_smiles: list of strs.
-         A list of valid smile strings, representing stereoisomers.
+	Returns
+	-------
+	stereo_smiles: list of strs.
+		 A list of valid smile strings, representing stereoisomers.
 
-    '''
+	"""
 
 	step_timer_start = time.perf_counter()
 
@@ -1843,8 +1983,6 @@ def run_rdkit_stereoisomer_generation(ctx, ligand, assigned=True):
 		raise RuntimeError("No output for stereoisomer state generation")
 
 
-
-
 def rdkit_conformation(ctx, tautomer, output_file):
 	try:
 		ret = func_timeout(int(ctx['config']['rdkit_conformation_timeout']), rdkit_generate_conformation, args=(ctx, tautomer, output_file))
@@ -1879,14 +2017,22 @@ def rdkit_generate_conformation(ctx, tautomer, output_file):
 	energies = []
 	for conf_id in range(len(list(ret))):
 		# Todo: Catch value error
-		AllChem.UFFOptimizeMolecule(mol_with_hs, confId=conf_id)
-		energy = AllChem.UFFGetMoleculeForceField(mol_with_hs, confId=conf_id).CalcEnergy()
+		mp = AllChem.MMFFGetMoleculeProperties(mol_with_hs, mmffVariant='MMFF94s')
+		if mp is None:
+			# Unsupported atom types for MMFF; fall back to UFF
+			ff = AllChem.UFFGetMoleculeForceField(mol_with_hs, confId=conf_id)
+			energy = ff.CalcEnergy()
+		else:
+			AllChem.MMFFOptimizeMolecule(mol_with_hs, confId=conf_id)
+			energy = AllChem.MMFFGetMoleculeForceField(mol_with_hs, mp, confId=conf_id).CalcEnergy()
+
 		energies.append((conf_id, energy))
 
 	# Select the conformer with the lowest energy
 	lowest_energy_conf_id = min(energies, key=lambda x: x[1])[0]
 
 	# Write the best conformer to a PDB file
+	# Todo: Change to sdf as the intermediate format?
 	with open(output_file_tmp, "w") as f:
 		f.write(Chem.MolToPDBBlock(mol_with_hs, confId=lowest_energy_conf_id))
 
@@ -1952,6 +2098,7 @@ def run_obabel_tautomer_generation(ctx, stereoisomer):
 	stereoisomer['tautomer_smiles'] = run_obtautomer_general_get_value(cmd, output_file, timeout=ctx['config']['obabel_tautomerization_timeout'])
 	del (stereoisomer['tautomer_smiles'][-1])
 	stereoisomer['tautomer_smiles'] = [i.strip() for i in stereoisomer['tautomer_smiles']]
+	stereoisomer['tautomer_smiles'] = list(dict.fromkeys(stereoisomer['tautomer_smiles']))
 
 	if int(ctx['config']['obabel_tautomer_max_count']) != 0 and len(stereoisomer['tautomer_smiles']) > int(ctx['config']['obabel_tautomer_max_count']):
 		stereoisomer['tautomer_smiles'] = stereoisomer['tautomer_smiles'][:int(ctx['config']['obabel_tautomer_max_count'])]
@@ -2194,7 +2341,7 @@ def run_epik7_protonation_batch(ctx, collection_temp_file, tasklist):
 
 	cmd = [
 		'-ph', tasklist[0]['config']['protonation_pH_value'],
-		'-pht', '0.5', '-ms', '1'
+		'-batch_size', '50', '-pht', '2.0', '-ms', '1'
 	]
 
 	if tasklist[0]['config']['epik7_protonation_options'] != "":
@@ -2207,16 +2354,18 @@ def run_epik7_protonation_batch(ctx, collection_temp_file, tasklist):
 		output_file
 	])
 
-	cwd = os.getcwd()
 	os.chdir(tasklist[0]['collection_temp_dir'].name)
 
-	try:
-		ret = subprocess.run(cmd, capture_output=True, text=True,
+	# Repeat until successful to prevent failure due to missing license
+	while not os.path.isfile(output_file):
+		try:
+			ret = subprocess.run(cmd, capture_output=True, text=True,
 							 timeout=int(tasklist[0]['config']['epik7_protonation_timeout']))
-	except subprocess.TimeoutExpired as err:
-		raise RuntimeError(f"epik7 timed out") from err
+		except subprocess.TimeoutExpired as err:
+			raise RuntimeError(f"epik7 timed out") from err
+		time.sleep(3)
 
-	os.chdir(cwd)
+	os.chdir(os.getenv('SLURM_SUBMIT_DIR', '.'))
 
 	# Get epik7 log
 	log = ""
@@ -2249,7 +2398,7 @@ def run_epik7_protonation_batch(ctx, collection_temp_file, tasklist):
 		raise RuntimeError(f"No output from epik7")
 	else:
 		try:
-			df = pd.read_csv(output_file)
+			df = pd.read_csv(output_file, engine="python", usecols=['NAME', 'SMILES'])
 			for taskitem in tasklist:
 				if taskitem['ligand_key'] in df['NAME'].values:
 					taskitem['ligand']['smi_protomer'] = df[df['NAME'] == taskitem['ligand_key']]['SMILES'].values[0]
@@ -2273,23 +2422,58 @@ def run_rdkit_tautomer_generation(ctx, stereoisomer):
 
 	try:
 		mol = smi2mol(stereoisomer['smi'])
+		if mol is None:
+			raise ValueError("Invalid input SMILES")
+
+		# Capture original stereo info before any enumeration
+		Chem.AssignStereochemistry(mol, force=True, cleanIt=True)
+		original_atom_stereo = _capture_original_atom_stereo(mol)   # idx -> {'cip','tag'}
+		original_bond_ez = _capture_original_bond_stereo(mol)       # (i,j) -> 'E'/'Z'
+		stereo_atom_idxs = list(original_atom_stereo.keys())
+
+		# Enumerate tautomers (atom indices preserved)
 		enumerator = TautomerEnumerator()
 		enumerator.SetMaxTautomers(int(ctx['config']['rdkit_tautomer_max_count']))
 		tautomer_mols = enumerator.Enumerate(mol)
-		for mol in tautomer_mols:
-			stereoisomer['tautomer_smiles'].append(mol2smi(mol))
-	except Exception:
-		stereoisomer['timers'].append(['rdkit_tautomerization', time.perf_counter() - step_timer_start])
-		raise RuntimeError("Tautomer state generation failed")
 
-	if (len(stereoisomer['tautomer_smiles']) >= 1):
-		stereoisomer['remarks'][
-			'tautomerization'] = f"The tautomeric state was generated by RDKit."
+		for tmol in tautomer_mols:
+			# Reassign stereo on the tautomer
+			Chem.AssignStereochemistry(tmol, force=True, cleanIt=True)
+
+			# Try to preserve per-atom R/S where the stereocenter still exists
+			for idx in stereo_atom_idxs:
+				target_cip = original_atom_stereo[idx]['cip']  # 'R' or 'S'
+				if idx < tmol.GetNumAtoms():
+					_match_atom_cip_by_flipping_if_needed(tmol, idx, target_cip)
+
+			# Try to preserve E/Z on double bonds where still applicable
+			_try_preserve_bond_ez(tmol, original_bond_ez)
+
+			# Final stereo assignment before output
+			Chem.AssignStereochemistry(tmol, force=True, cleanIt=True)
+
+			# SMILES with stereo encoded; keep canonical=False to avoid reordering,
+			# but ensure isomericSmiles=True so stereo is written
+			stereoisomer['tautomer_smiles'].append(
+				mol2smi(tmol, canonical=False)
+			)
+
+		# Deduplicate
+		stereoisomer['tautomer_smiles'] = list(set(stereoisomer['tautomer_smiles']))
+
+	except Exception as e:
 		stereoisomer['timers'].append(['rdkit_tautomerization', time.perf_counter() - step_timer_start])
+		raise RuntimeError("Tautomer state generation failed") from e
+
+	# Wrap up
+	stereoisomer['timers'].append(['rdkit_tautomerization', time.perf_counter() - step_timer_start])
+	if len(stereoisomer['tautomer_smiles']) >= 1:
+		remarks = stereoisomer.get('remarks', {})
+		remarks['tautomerization'] = "Tautomeric states generated by RDKit."
+		stereoisomer['remarks'] = remarks
 		return
 	else:
-		stereoisomer['timers'].append(['rdkit_tautomerization', time.perf_counter() - step_timer_start])
-		raise RuntimeError(f"No output for tautomer state generation")
+		raise RuntimeError("No output for tautomer state generation")
 
 
 # Step 5: Assign Tranche
@@ -2981,7 +3165,7 @@ def process_collection(ctx, collection_key, collection, collection_data):
 
 	start_time = datetime.now()
 
-	if ctx['main_config']['protonation_program_1'] == "epik7_batch":
+	if ctx['main_config']['protonation_state_generation'] == "true" and ctx['main_config']['protonation_program_1'] == "epik7_batch":
 
 		for taskitem in tasklist:
 			process_ligand(taskitem)
@@ -3298,8 +3482,8 @@ def main():
 	botoconfig = Config(
 	   region_name = aws_region,
 	   retries = {
-	      'max_attempts': 15,
-	      'mode': 'standard'
+		  'max_attempts': 15,
+		  'mode': 'standard'
 	   }
 	)
 
@@ -3322,7 +3506,7 @@ def main():
 		print("could not run df -h")
 
 if __name__ == '__main__':
-    main()
+	main()
 
 
 
