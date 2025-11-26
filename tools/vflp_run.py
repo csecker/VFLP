@@ -2019,11 +2019,10 @@ def rdkit_generate_conformation(ctx, tautomer, output_file):
 		# Todo: Catch value error
 		mp = AllChem.MMFFGetMoleculeProperties(mol_with_hs, mmffVariant='MMFF94s')
 		if mp is None:
-			# Unsupported atom types for MMFF; fall back to UFF
-			ff = AllChem.UFFGetMoleculeForceField(mol_with_hs, confId=conf_id)
-			energy = ff.CalcEnergy()
+			AllChem.UFFOptimizeMolecule(mol_with_hs, confId=conf_id, maxIters=int(ctx['config']['rdkit_conformation_max_iters']))
+			energy = AllChem.UFFGetMoleculeForceField(mol_with_hs, confId=conf_id).CalcEnergy()
 		else:
-			AllChem.MMFFOptimizeMolecule(mol_with_hs, confId=conf_id)
+			AllChem.MMFFOptimizeMolecule(mol_with_hs, confId=conf_id, maxIters=int(ctx['config']['rdkit_conformation_max_iters']))
 			energy = AllChem.MMFFGetMoleculeForceField(mol_with_hs, mp, confId=conf_id).CalcEnergy()
 
 		energies.append((conf_id, energy))
