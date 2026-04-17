@@ -40,6 +40,7 @@ import re
 import boto3
 import multiprocessing
 import subprocess
+import signal
 import botocore
 import logging
 import time
@@ -140,7 +141,7 @@ def process_ligand(ctx):
 	base_ligand['timers'].append(['neutralization', time.perf_counter() - step_timer_start])
 
 	# Return if this run is for Epik 7 batch protonation
-	if(ctx['config']['protonation_program_1'].endswith("_batch") and 'smi_protomer' not in base_ligand):
+	if(ctx['config']['protonation_state_generation'] == "true" and ctx['config']['protonation_program_1'].endswith("_batch") and 'smi_protomer' not in base_ligand):
 		base_ligand['smi_protomer'] = ''
 		return
 
@@ -1158,6 +1159,25 @@ def file_is_empty(filename):
 	return True
 
 
+def run_with_timeout_kill_tree(cmd, timeout_s: int):
+	# start_new_session puts the child in its own process group
+	proc = subprocess.Popen(
+		cmd,
+		stdout=subprocess.PIPE,
+		stderr=subprocess.PIPE,
+		text=True,
+		start_new_session=True,
+	)
+	try:
+		stdout, stderr = proc.communicate(timeout=timeout_s)
+		return proc.returncode, stdout, stderr
+	except subprocess.TimeoutExpired as e:
+		# Kill EVERYTHING spawned by conda/qupkake/xtb
+		os.killpg(proc.pid, signal.SIGKILL)
+		proc.wait()
+		raise RuntimeError("qupkake timed out (killed process group)") from e
+
+
 def remove_free_electrons(mol):
 	# Remove radicals
 	for atom in mol.GetAtoms():
@@ -2151,14 +2171,22 @@ def run_qupkake_protonation(ctx, tautomer, i, smis_protomers_qupkake, diffs):
 
 	qupkake_sdf_filepath = tautomer['intermediate_dir'] / "output" / qupkake_sdf_filename
 
-	try:
-		ret = subprocess.run(cmd, capture_output=True, text=True, timeout=int(ctx['config']['qupkake_protonation_timeout']))
-	except subprocess.TimeoutExpired as err:
-		raise RuntimeError(f"qupkake timed out") from err
+	timeout = int(ctx["config"]["qupkake_protonation_timeout"])
+	rc, stdout, stderr = run_with_timeout_kill_tree(cmd, timeout)
 
-	output_lines = ret.stdout.splitlines()
+	debug_save_output(stdout=stdout, stderr=stderr, ctx=ctx, tautomer=tautomer, file="qupkake_protonate")
 
-	debug_save_output(stdout=ret.stdout, stderr=ret.stderr, ctx=ctx, tautomer=tautomer, file="qupkake_protonate")
+	if rc != 0:
+		raise RuntimeError(f"qupkake failed (returncode={rc})")
+
+	#try:
+	#	ret = subprocess.run(cmd, capture_output=True, text=True, timeout=int(ctx['config']['qupkake_protonation_timeout']))
+	#except subprocess.TimeoutExpired as err:
+	#	raise RuntimeError(f"qupkake timed out") from err
+
+	output_lines = stdout.splitlines()
+
+	#debug_save_output(stdout=stdout, stderr=stderr, ctx=ctx, tautomer=tautomer, file="qupkake_protonate")
 
 	if len(output_lines) == 0 or not os.path.isfile(qupkake_sdf_filepath):
 		raise RuntimeError(f"No output from qupkake")
@@ -2227,7 +2255,7 @@ def run_qupkake_protonation(ctx, tautomer, i, smis_protomers_qupkake, diffs):
 							tautomer['smi_protomer'] = smis_protomers_qupkake[smis_protomers_qupkake.index(mol2smi(mol))]
 						else:
 							tautomer['smi_protomer'] = smis_protomers_qupkake[i]
-						logging.debug(f"succesful protonation with cxcalc for {tautomer['key']}")
+						logging.debug(f"succesful protonation with qupkake and rdkit for {tautomer['key']}")
 						return
 				except Exception:
 					raise RuntimeError(f"Protonation state generation failed")
@@ -2243,7 +2271,7 @@ def run_qupkake_protonation(ctx, tautomer, i, smis_protomers_qupkake, diffs):
 							tautomer['smi_protomer'] = smis_protomers_qupkake[smis_protomers_qupkake.index(mol2smi(mol))]
 						else:
 							tautomer['smi_protomer'] = smis_protomers_qupkake[i]
-						logging.debug(f"succesful protonation with cxcalc for {tautomer['key']}")
+						logging.debug(f"succesful protonation with qupkake and rdkit for {tautomer['key']}")
 						return
 				except Exception:
 					raise RuntimeError(f"Protonation state generation failed")
